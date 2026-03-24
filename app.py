@@ -54,6 +54,7 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     border: 1px solid #e5e7eb;
     padding: 1.6rem 2rem; margin-bottom: 1.2rem;
     box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+    color: #374151;
 }
 
 .phase-badge {
