@@ -182,7 +182,7 @@ def update_raffle_email(email):
     if ws is None:
         return
     try:
-        all_ids = ws.col_values(1)  # participant_id is column 1
+        all_ids = ws.col_values(1)
         for i, pid in enumerate(reversed(all_ids)):
             if pid == st.session_state.session_id:
                 row_idx = len(all_ids) - i
@@ -569,7 +569,7 @@ Scoring rubric per dimension (0-4):
 total = sum of all five scores (max 20).
 Be fair and consistent. This is for peer-reviewed academic research."""
 
-MAX_CHAT_TURNS = 5  # max user messages per scenario
+MAX_CHAT_TURNS = 5
 
 
 # ── Session state ─────────────────────────────────────────────────────────────
@@ -584,14 +584,14 @@ def init_state():
         "mc_answers": {},
         "mc_start": None,
         "current_scenario_idx": 0,
-        "scenario_phase": {},    # key → "initial" | "chat" | "final"
-        "scenario_start": None,  # float timestamp
-        "scenario_initial": {},  # key → str
-        "scenario_chat": {},     # key → list[{role, content}]
-        "scenario_final": {},    # key → str
-        "scenario_scores": {},   # key → dict
-        "scenario_times": {},    # key → float
-        "chat_input_reset": 0,   # increment to clear input widget
+        "scenario_phase": {},
+        "scenario_start": None,
+        "scenario_initial": {},
+        "scenario_chat": {},
+        "scenario_final": {},
+        "scenario_scores": {},
+        "scenario_times": {},
+        "chat_input_reset": 0,
         "raffle_email": "",
         "raffle_submitted": False,
     }
@@ -602,7 +602,7 @@ def init_state():
 
 init_state()
 
-PAGE_NAMES = ["Welcome", "About You", "Self-Perception", "AI Knowledge Quiz", "AI Scenarios", "Complete"]
+PAGE_NAMES = ["Welcome", "About You", "Self-Perception", "AI Knowledge Quiz", "Scenario Intro", "AI Scenarios", "Complete"]
 TOTAL_PAGES = len(PAGE_NAMES) - 1
 
 
@@ -799,7 +799,6 @@ elif st.session_state.page == 2:
 elif st.session_state.page == 3:
 
     if not st.session_state.mc_pool:
-        # Pick 1 question from each domain (up to 5 domains)
         domains = {}
         for q in MC_BANK:
             domains.setdefault(q["domain"], []).append(q)
@@ -852,17 +851,16 @@ elif st.session_state.page == 3:
 
     show_progress()
 
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # PAGE 4 — Scenario Section Breaker
 # ═══════════════════════════════════════════════════════════════════════════════
-st.markdown("""
-    <div class="survey-card">
-      <h3 style="color:#A6192E;margin-top:0">What You'll Be Doing</h3>
-      <p>The final section presents two business scenarios. For each, you'll work through three short phases:</p>
+elif st.session_state.page == 4:
 
-      <div style="display:flex;flex-direction:column;gap:0.9rem;margin:1.2rem 0">
-        ...all the flexbox divs...
-      </div>
+    st.markdown("""
+    <div class="section-header">
+      <h2>Part 4: Real-World AI Scenarios</h2>
+      <p>Apply your thinking to two realistic business situations</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -870,41 +868,18 @@ st.markdown("""
     <div class="survey-card">
       <h3 style="color:#A6192E;margin-top:0">What You'll Be Doing</h3>
       <p>The final section presents two business scenarios. For each, you'll work through three short phases:</p>
-
-      <div style="display:flex;flex-direction:column;gap:0.9rem;margin:1.2rem 0">
-
-        <div style="display:flex;align-items:flex-start;gap:1rem">
-          <div style="background:#A6192E;color:white;border-radius:50%;width:32px;height:32px;
-                      display:flex;align-items:center;justify-content:center;
-                      font-weight:700;font-size:0.9rem;flex-shrink:0">1</div>
-          <div>
-            <strong>Write your initial response</strong><br>
-            <span style="color:#6b7280;font-size:0.9rem">Read the scenario and share your thinking on your own first — no AI involved yet.</span>
-          </div>
-        </div>
-
-        <div style="display:flex;align-items:flex-start;gap:1rem">
-          <div style="background:#A6192E;color:white;border-radius:50%;width:32px;height:32px;
-                      display:flex;align-items:center;justify-content:center;
-                      font-weight:700;font-size:0.9rem;flex-shrink:0">2</div>
-          <div>
-            <strong>Discuss with an AI assistant</strong><br>
-            <span style="color:#6b7280;font-size:0.9rem">An AI will ask Socratic questions to help you pressure-test your ideas.
-            This step is <em>optional</em> — you can skip it if you prefer.</span>
-          </div>
-        </div>
-
-        <div style="display:flex;align-items:flex-start;gap:1rem">
-          <div style="background:#A6192E;color:white;border-radius:50%;width:32px;height:32px;
-                      display:flex;align-items:center;justify-content:center;
-                      font-weight:700;font-size:0.9rem;flex-shrink:0">3</div>
-          <div>
-            <strong>Write your final response</strong><br>
-            <span style="color:#6b7280;font-size:0.9rem">Revise or expand your answer based on your reflection. This is what gets scored.</span>
-          </div>
-        </div>
-
-      </div>
+      <p>
+        <span style="background:#A6192E;color:white;border-radius:50%;padding:2px 9px;font-weight:700;margin-right:8px">1</span>
+        <strong>Write your initial response</strong> — Read the scenario and share your thinking on your own first. No AI involved yet.
+      </p>
+      <p>
+        <span style="background:#A6192E;color:white;border-radius:50%;padding:2px 9px;font-weight:700;margin-right:8px">2</span>
+        <strong>Discuss with an AI assistant</strong> — An AI will ask Socratic questions to help you pressure-test your ideas. This step is <em>optional</em>.
+      </p>
+      <p>
+        <span style="background:#A6192E;color:white;border-radius:50%;padding:2px 9px;font-weight:700;margin-right:8px">3</span>
+        <strong>Write your final response</strong> — Revise or expand your answer based on your reflection. This is what gets scored.
+      </p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -929,21 +904,17 @@ st.markdown("""
             next_page()
 
     show_progress()
-    
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
-# PAGE 4 — Interactive AI Scenarios  (3-phase flow per scenario)
-#
-#   Phase 1 "initial"  → student writes unaided first response
-#   Phase 2 "chat"     → Socratic back-and-forth with Claude (up to 5 turns)
-#   Phase 3 "final"    → student writes final response (pre-seeded from initial)
+# PAGE 5 — Interactive AI Scenarios  (3-phase flow per scenario)
 # ═══════════════════════════════════════════════════════════════════════════════
-elif st.session_state.page == 4:
+elif st.session_state.page == 5:
 
     idx = st.session_state.current_scenario_idx
     scenario = SCENARIOS[idx]
     key = scenario["key"]
 
-    # Bootstrap per-scenario state on first visit
     if key not in st.session_state.scenario_phase:
         st.session_state.scenario_phase[key] = "initial"
         st.session_state.scenario_chat[key] = []
@@ -951,7 +922,6 @@ elif st.session_state.page == 4:
 
     phase = st.session_state.scenario_phase[key]
 
-    # ── Scenario progress pills ──────────────────────────────────────────────
     pill_html = ""
     for pi in range(len(SCENARIOS)):
         if pi < idx:
@@ -982,16 +952,12 @@ elif st.session_state.page == 4:
     </div>
     """, unsafe_allow_html=True)
 
-    # Scenario context always visible
     st.markdown("#### Scenario")
     st.info(scenario["context"])
     st.markdown("#### Your Task")
     st.markdown(scenario["prompt"])
     st.markdown("---")
 
-    # ────────────────────────────────────────────────────────────────────────
-    # PHASE 1 — Initial response (unaided)
-    # ────────────────────────────────────────────────────────────────────────
     if phase == "initial":
         st.markdown("### ✏️ Write Your Initial Response")
         st.caption(
@@ -1027,9 +993,6 @@ elif st.session_state.page == 4:
         if not can_advance:
             st.caption("Please write at least a few sentences before continuing.")
 
-    # ────────────────────────────────────────────────────────────────────────
-    # PHASE 2 — Chat with Claude
-    # ────────────────────────────────────────────────────────────────────────
     elif phase == "chat":
         st.markdown("### 💬 Discuss with the AI Assistant")
 
@@ -1046,7 +1009,6 @@ elif st.session_state.page == 4:
             "This step is optional; click *Write Final Response* whenever you're ready."
         )
 
-        # Render conversation
         if not chat_hist:
             st.markdown(
                 '<p style="color:#9ca3af;font-style:italic;font-size:0.88rem;margin:1rem 0">'
@@ -1065,7 +1027,6 @@ elif st.session_state.page == 4:
                     unsafe_allow_html=True,
                 )
 
-        # Chat input
         if turns_left > 0:
             user_input = st.text_input(
                 "Your message",
@@ -1092,9 +1053,6 @@ elif st.session_state.page == 4:
                 st.session_state.scenario_phase[key] = "final"
                 st.rerun()
 
-    # ────────────────────────────────────────────────────────────────────────
-    # PHASE 3 — Final response
-    # ────────────────────────────────────────────────────────────────────────
     elif phase == "final":
         st.markdown("### ✅ Write Your Final Response")
         st.caption(
@@ -1112,7 +1070,6 @@ elif st.session_state.page == 4:
                     prefix = "You" if msg["role"] == "user" else "AI"
                     st.markdown(f"**{prefix}:** {msg['content']}")
 
-        # Pre-seed final with initial if not yet set
         default_final = st.session_state.scenario_final.get(
             key, st.session_state.scenario_initial.get(key, "")
         )
@@ -1161,9 +1118,9 @@ elif st.session_state.page == 4:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PAGE 5 — Completion + Raffle + Admin Export
+# PAGE 6 — Completion + Raffle + Admin Export
 # ═══════════════════════════════════════════════════════════════════════════════
-elif st.session_state.page == 5:
+elif st.session_state.page == 6:
 
     st.markdown("""
     <div class="section-header">
@@ -1220,7 +1177,6 @@ elif st.session_state.page == 5:
         unsafe_allow_html=True,
     )
 
-    # ── Researcher admin panel ─────────────────────────────────────────────
     with st.expander("🔒 Researcher Data Export"):
         try:
             correct_pwd = st.secrets["RESEARCHER_PASSWORD"]
