@@ -855,12 +855,14 @@ elif st.session_state.page == 3:
 # ═══════════════════════════════════════════════════════════════════════════════
 # PAGE 4 — Scenario Section Breaker
 # ═══════════════════════════════════════════════════════════════════════════════
-elif st.session_state.page == 4:
+st.markdown("""
+    <div class="survey-card">
+      <h3 style="color:#A6192E;margin-top:0">What You'll Be Doing</h3>
+      <p>The final section presents two business scenarios. For each, you'll work through three short phases:</p>
 
-    st.markdown("""
-    <div class="section-header">
-      <h2>Part 4: Real-World AI Scenarios</h2>
-      <p>Apply your thinking to two realistic business situations</p>
+      <div style="display:flex;flex-direction:column;gap:0.9rem;margin:1.2rem 0">
+        ...all the flexbox divs...
+      </div>
     </div>
     """, unsafe_allow_html=True)
 
