@@ -852,7 +852,82 @@ elif st.session_state.page == 3:
 
     show_progress()
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# PAGE 4 — Scenario Section Breaker
+# ═══════════════════════════════════════════════════════════════════════════════
+elif st.session_state.page == 4:
 
+    st.markdown("""
+    <div class="section-header">
+      <h2>Part 4: Real-World AI Scenarios</h2>
+      <p>Apply your thinking to two realistic business situations</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("""
+    <div class="survey-card">
+      <h3 style="color:#A6192E;margin-top:0">What You'll Be Doing</h3>
+      <p>The final section presents two business scenarios. For each, you'll work through three short phases:</p>
+
+      <div style="display:flex;flex-direction:column;gap:0.9rem;margin:1.2rem 0">
+
+        <div style="display:flex;align-items:flex-start;gap:1rem">
+          <div style="background:#A6192E;color:white;border-radius:50%;width:32px;height:32px;
+                      display:flex;align-items:center;justify-content:center;
+                      font-weight:700;font-size:0.9rem;flex-shrink:0">1</div>
+          <div>
+            <strong>Write your initial response</strong><br>
+            <span style="color:#6b7280;font-size:0.9rem">Read the scenario and share your thinking on your own first — no AI involved yet.</span>
+          </div>
+        </div>
+
+        <div style="display:flex;align-items:flex-start;gap:1rem">
+          <div style="background:#A6192E;color:white;border-radius:50%;width:32px;height:32px;
+                      display:flex;align-items:center;justify-content:center;
+                      font-weight:700;font-size:0.9rem;flex-shrink:0">2</div>
+          <div>
+            <strong>Discuss with an AI assistant</strong><br>
+            <span style="color:#6b7280;font-size:0.9rem">An AI will ask Socratic questions to help you pressure-test your ideas.
+            This step is <em>optional</em> — you can skip it if you prefer.</span>
+          </div>
+        </div>
+
+        <div style="display:flex;align-items:flex-start;gap:1rem">
+          <div style="background:#A6192E;color:white;border-radius:50%;width:32px;height:32px;
+                      display:flex;align-items:center;justify-content:center;
+                      font-weight:700;font-size:0.9rem;flex-shrink:0">3</div>
+          <div>
+            <strong>Write your final response</strong><br>
+            <span style="color:#6b7280;font-size:0.9rem">Revise or expand your answer based on your reflection. This is what gets scored.</span>
+          </div>
+        </div>
+
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("""
+    <div class="survey-card" style="background:#f9f1f2;border-color:#f3c4cc">
+      <h4 style="color:#A6192E;margin-top:0">A Few Things to Know</h4>
+      <p style="font-size:0.92rem;color:#374151">You will be given <strong>two scenarios</strong> to respond to.</p>
+      <ul style="margin:0;padding-left:1.2rem;font-size:0.92rem;color:#374151;line-height:1.8">
+        <li>There are <strong>no trick questions</strong> — we're interested in your reasoning process, not a single correct answer.</li>
+        <li>Responses are scored on <strong>depth and business thinking</strong>, not length.</li>
+        <li>The AI chat is a <strong>thinking tool</strong>, not a grader — it won't write your answer for you.</li>
+      </ul>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col1:
+        if st.button("← Back"):
+            prev_page()
+    with col3:
+        if st.button("Begin Scenarios →"):
+            next_page()
+
+    show_progress()
+    
 # ═══════════════════════════════════════════════════════════════════════════════
 # PAGE 4 — Interactive AI Scenarios  (3-phase flow per scenario)
 #
