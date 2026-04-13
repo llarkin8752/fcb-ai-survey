@@ -77,6 +77,12 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     font-size: 0.9rem; line-height: 1.5;
 }
 
+.simplified-card {
+    background: #fffbeb; border-radius: 12px;
+    border: 2px solid #f59e0b;
+    padding: 1.2rem 1.6rem; margin-top: 0.8rem;
+}
+
 .raffle-box {
     background: linear-gradient(135deg, #fffbeb, #fef3c7);
     border: 2px solid #f59e0b; border-radius: 16px;
@@ -101,6 +107,7 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 SHEET_HEADERS = [
     "participant_id", "submitted_at", "major", "academic_year",
+    "completion_status",
     "likert_1", "likert_2", "likert_3", "likert_4", "likert_5", "likert_avg",
     "mc_questions", "mc_answers", "mc_score", "mc_total", "mc_time_sec",
     "s1_key", "s1_initial_response", "s1_chat_turns", "s1_chat_history",
@@ -129,48 +136,148 @@ def get_sheet():
         return None
 
 
+# ── Progressive save helpers ──────────────────────────────────────────────────
+
+def _find_row(ws):
+    """Return the 1-based sheet row index for the current session, or None."""
+    try:
+        all_ids = ws.col_values(1)
+        for i, pid in enumerate(reversed(all_ids)):
+            if pid == st.session_state.session_id:
+                return len(all_ids) - i
+    except Exception:
+        pass
+    return None
+
+
+def _update_col(ws, row_idx, col_name, value):
+    """Update a single named column in an existing row."""
+    try:
+        header = ws.row_values(1)
+        col_idx = header.index(col_name) + 1
+        ws.update_cell(row_idx, col_idx, str(value))
+    except Exception:
+        pass
+
+
+def save_initial(major, year):
+    """
+    STAGE 1 — Called on Page 1 (About You) when respondent confirms FCB status.
+    Creates a new row with participant_id, timestamp, major, year, and
+    completion_status = 'started'. All other columns are left blank.
+    """
+    ws = get_sheet()
+    if ws is None:
+        return
+    try:
+        header = ws.row_values(1)
+        blank_row = [""] * len(header)
+        blank_row[header.index("participant_id")]    = st.session_state.session_id
+        blank_row[header.index("submitted_at")]      = datetime.now().isoformat()
+        blank_row[header.index("major")]             = major
+        blank_row[header.index("academic_year")]     = year
+        blank_row[header.index("completion_status")] = "started"
+        ws.append_row(blank_row)
+    except Exception:
+        pass
+
+
+def save_likert():
+    """
+    STAGE 2a — Called after Page 2 (Likert).
+    Updates likert columns and advances completion_status to 'likert_complete'.
+    """
+    ws = get_sheet()
+    if ws is None:
+        return
+    row_idx = _find_row(ws)
+    if not row_idx:
+        return
+    try:
+        likert_vals = [st.session_state.likert.get(i, 0) for i in range(5)]
+        likert_avg  = round(sum(likert_vals) / 5, 2) if all(likert_vals) else ""
+        for i, val in enumerate(likert_vals):
+            _update_col(ws, row_idx, f"likert_{i+1}", val)
+        _update_col(ws, row_idx, "likert_avg", likert_avg)
+        _update_col(ws, row_idx, "completion_status", "likert_complete")
+    except Exception:
+        pass
+
+
+def save_mc():
+    """
+    STAGE 2b — Called after Page 3 (MC quiz).
+    Updates MC columns and advances completion_status to 'mc_complete'.
+    """
+    ws = get_sheet()
+    if ws is None:
+        return
+    row_idx = _find_row(ws)
+    if not row_idx:
+        return
+    try:
+        mc_pool    = st.session_state.mc_pool
+        mc_answers = st.session_state.mc_answers
+        mc_score   = sum(1 for q in mc_pool if mc_answers.get(q["key"]) == q["answer"])
+        mc_time    = round(time.time() - st.session_state.mc_start, 1) if st.session_state.mc_start else ""
+        _update_col(ws, row_idx, "mc_questions", json.dumps([q["key"] for q in mc_pool]))
+        _update_col(ws, row_idx, "mc_answers",   json.dumps(mc_answers))
+        _update_col(ws, row_idx, "mc_score",     mc_score)
+        _update_col(ws, row_idx, "mc_total",     len(mc_pool))
+        _update_col(ws, row_idx, "mc_time_sec",  mc_time)
+        _update_col(ws, row_idx, "completion_status", "mc_complete")
+    except Exception:
+        pass
+
+
+def save_scenario(scenario_key, is_last):
+    """
+    STAGE 2c — Called after each scenario is submitted.
+    Updates scenario columns and advances completion_status.
+    is_last=True triggers 'submitted' status on the final scenario.
+    """
+    ws = get_sheet()
+    if ws is None:
+        return
+    row_idx = _find_row(ws)
+    if not row_idx:
+        return
+    try:
+        scenario_num = next(
+            (i + 1 for i, s in enumerate(SCENARIOS) if s["key"] == scenario_key), None
+        )
+        if not scenario_num:
+            return
+        prefix = f"s{scenario_num}"
+        k = scenario_key
+        chat_hist  = st.session_state.scenario_chat.get(k, [])
+        user_turns = len([m for m in chat_hist if m["role"] == "user"])
+        _update_col(ws, row_idx, f"{prefix}_key",              k)
+        _update_col(ws, row_idx, f"{prefix}_initial_response", st.session_state.scenario_initial.get(k, ""))
+        _update_col(ws, row_idx, f"{prefix}_chat_turns",       user_turns)
+        _update_col(ws, row_idx, f"{prefix}_chat_history",     json.dumps(chat_hist))
+        _update_col(ws, row_idx, f"{prefix}_final_response",   st.session_state.scenario_final.get(k, ""))
+        _update_col(ws, row_idx, f"{prefix}_ai_score_json",    json.dumps(st.session_state.scenario_scores.get(k, {})))
+        _update_col(ws, row_idx, f"{prefix}_time_sec",         st.session_state.scenario_times.get(k, ""))
+        status = "submitted" if is_last else f"scenario_{scenario_num}_complete"
+        _update_col(ws, row_idx, "completion_status", status)
+    except Exception:
+        pass
+
+
 def save_to_sheet():
+    """
+    STAGE 3 — Final save on full submission (kept for compatibility).
+    At this point all data is already saved progressively; this just
+    ensures completion_status is marked 'submitted'.
+    """
     ws = get_sheet()
     if ws is None:
         return False
     try:
-        likert_vals = [st.session_state.likert.get(i, 0) for i in range(5)]
-        likert_avg = round(sum(likert_vals) / 5, 2) if all(likert_vals) else ""
-        mc_pool = st.session_state.mc_pool
-        mc_answers = st.session_state.mc_answers
-        mc_score = sum(1 for q in mc_pool if mc_answers.get(q["key"]) == q["answer"])
-        mc_time = round(time.time() - st.session_state.mc_start, 1) if st.session_state.mc_start else ""
-
-        row = [
-            st.session_state.session_id,
-            datetime.now().isoformat(),
-            st.session_state.major,
-            st.session_state.year,
-            *likert_vals,
-            likert_avg,
-            json.dumps([q["key"] for q in mc_pool]),
-            json.dumps(mc_answers),
-            mc_score,
-            len(mc_pool),
-            mc_time,
-        ]
-
-        for s in SCENARIOS:
-            k = s["key"]
-            chat_hist = st.session_state.scenario_chat.get(k, [])
-            user_turns = len([m for m in chat_hist if m["role"] == "user"])
-            row += [
-                k,
-                st.session_state.scenario_initial.get(k, ""),
-                user_turns,
-                json.dumps(chat_hist),
-                st.session_state.scenario_final.get(k, ""),
-                json.dumps(st.session_state.scenario_scores.get(k, {})),
-                st.session_state.scenario_times.get(k, ""),
-            ]
-
-        row.append(st.session_state.raffle_email)
-        ws.append_row([str(v) for v in row])
+        row_idx = _find_row(ws)
+        if row_idx:
+            _update_col(ws, row_idx, "completion_status", "submitted")
         return True
     except Exception as e:
         st.error(f"Save failed: {e}")
@@ -178,18 +285,14 @@ def save_to_sheet():
 
 
 def update_raffle_email(email):
+    """Updates the raffle_email column for the current session row."""
     ws = get_sheet()
     if ws is None:
         return
     try:
-        all_ids = ws.col_values(1)
-        for i, pid in enumerate(reversed(all_ids)):
-            if pid == st.session_state.session_id:
-                row_idx = len(all_ids) - i
-                header = ws.row_values(1)
-                col_idx = header.index("raffle_email") + 1
-                ws.update_cell(row_idx, col_idx, email)
-                return
+        row_idx = _find_row(ws)
+        if row_idx:
+            _update_col(ws, row_idx, "raffle_email", email)
     except Exception:
         pass
 
@@ -259,6 +362,83 @@ LIKERT_QUESTIONS = [
     "I believe my SDSU coursework has adequately prepared me to use AI in my future career.",
 ]
 LIKERT_LABELS = ["Strongly\nDisagree", "Disagree", "Neutral", "Agree", "Strongly\nAgree"]
+
+
+# ── Simplified fallback questions ─────────────────────────────────────────────
+# Shown when a respondent selects "I'm not sure what's being asked."
+# Keyed by the original MC_BANK question key.
+SIMPLIFIED_QUESTIONS = {
+    "pe_improve_output": {
+        "q": "Your AI-generated report feels too vague. What is the best way to get a more useful result?",
+        "options": {
+            "A": "Change a technical setting to make the output more random.",
+            "B": "Rewrite your instructions to be more specific about what you need.",
+            "C": "Ask it to write more words.",
+            "D": "Keep trying the same request until it improves.",
+        },
+        "answer": "B",
+    },
+    "custom_gpt_advanced": {
+        "q": "What is the safest way to set up a Custom GPT for use in a business?",
+        "options": {
+            "A": "Permanently train it on your company's private data.",
+            "B": "Turn up its creativity settings for better results.",
+            "C": "Remove its guidelines so it can answer more freely.",
+            "D": "Connect it to approved company sources with clear rules and human review.",
+        },
+        "answer": "D",
+    },
+    "llm_distribution_shift": {
+        "q": "An AI works great during testing but struggles in real workplace situations. Why might this happen?",
+        "options": {
+            "A": "It was only tested on familiar situations, so new ones throw it off.",
+            "B": "It forgot what it learned during testing.",
+            "C": "It changes how it behaves depending on who is using it.",
+            "D": "It needs more creative tasks to perform well.",
+        },
+        "answer": "A",
+    },
+    "data_privacy_reidentification": {
+        "q": "You removed all names from customer conversations before using AI. Are there still privacy risks?",
+        "options": {
+            "A": "No — removing names is enough to protect privacy.",
+            "B": "Yes — the AI may still figure out who someone is based on other details like their role or location.",
+            "C": "No — AI cannot store or remember conversation data.",
+            "D": "Yes — but only if the conversations mention financial information.",
+        },
+        "answer": "B",
+    },
+    "hallucination_cutoff": {
+        "q": "An AI gives a detailed explanation of something that happened after it was last updated. What most likely explains this?",
+        "options": {
+            "A": "It has a live connection to current news.",
+            "B": "It remembered and stored that future event in advance.",
+            "C": "It made up a convincing-sounding answer based on patterns it already knew.",
+            "D": "It was smart enough to figure out what must have happened on its own.",
+        },
+        "answer": "C",
+    },
+    "bias_detection_student": {
+        "q": "An AI trained mostly on city data is used to predict what rural customers want. What is the biggest risk?",
+        "options": {
+            "A": "It will respond more slowly in rural areas.",
+            "B": "Its predictions may not apply well to rural customers because it learned mostly from city patterns.",
+            "C": "It will need extra memory to handle geographic differences.",
+            "D": "It will produce longer answers than necessary.",
+        },
+        "answer": "B",
+    },
+    "bias_detection_demographic": {
+        "q": "AI recommends ignoring customers aged 18-34 because they seem harder to satisfy. How should you respond?",
+        "options": {
+            "A": "Accept it — younger customers are commonly known to be less satisfied.",
+            "B": "Question it — the data the AI learned from may have been skewed, so check other sources first.",
+            "C": "Verify it with just one other source, then use the recommendation.",
+            "D": "Flag it as a concern but still share the recommendation with your team.",
+        },
+        "answer": "B",
+    },
+}
 
 MC_BANK = [
     # ── Prompt Engineering ──────────────────────────────────────────────────
@@ -582,6 +762,7 @@ def init_state():
         "likert": {},
         "mc_pool": [],
         "mc_answers": {},
+        "mc_clarify_answers": {},
         "mc_start": None,
         "current_scenario_idx": 0,
         "scenario_phase": {},
@@ -734,6 +915,7 @@ elif st.session_state.page == 1:
             if st.button("Continue", disabled=not can_continue):
                 st.session_state.year = year
                 st.session_state.major = major
+                save_initial(major, year)   # STAGE 1: create row in Google Sheets
                 next_page()
 
         if not can_continue:
@@ -785,6 +967,7 @@ elif st.session_state.page == 2:
             prev_page()
     with col3:
         if st.button("Continue", disabled=not all_answered):
+            save_likert()   # STAGE 2a: save Likert scores to Google Sheets
             next_page()
 
     if not all_answered:
@@ -820,23 +1003,81 @@ elif st.session_state.page == 3:
     </div>
     """, unsafe_allow_html=True)
 
+    st.caption(
+        "If a question uses terms you are unfamiliar with, select "
+        "'E. I\'m not sure what\'s being asked' — a simpler version will appear below it."
+    )
+    st.markdown("")
+
     for i, q in enumerate(st.session_state.mc_pool):
+        qkey = q["key"]
+        has_simplified = qkey in SIMPLIFIED_QUESTIONS
+
+        # Build option list with clarify option appended as E
         st.markdown(f"**Q{i + 1}.** {q['q']}")
         options = [f"{k}. {v}" for k, v in q["options"].items()]
-        current_k = st.session_state.mc_answers.get(q["key"])
-        current_f = f"{current_k}. {q['options'][current_k]}" if current_k and current_k in q["options"] else None
-        idx_val = options.index(current_f) if current_f in options else None
+        clarify_label = "E. I'm not sure what's being asked."
+        options_with_clarify = options + [clarify_label]
+
+        # Resolve current displayed selection
+        current_k = st.session_state.mc_answers.get(qkey)
+        if current_k == "CLARIFY":
+            current_display = clarify_label
+        elif current_k and current_k in q["options"]:
+            current_display = f"{current_k}. {q['options'][current_k]}"
+        else:
+            current_display = None
+        idx_val = options_with_clarify.index(current_display) if current_display in options_with_clarify else None
 
         chosen = st.radio(
-            label="", options=options, index=idx_val,
-            key=f"mc_{q['key']}", label_visibility="collapsed",
+            label="", options=options_with_clarify, index=idx_val,
+            key=f"mc_{qkey}", label_visibility="collapsed",
         )
         if chosen:
-            st.session_state.mc_answers[q["key"]] = chosen[0]
+            if chosen == clarify_label:
+                st.session_state.mc_answers[qkey] = "CLARIFY"
+            else:
+                st.session_state.mc_answers[qkey] = chosen[0]
+                st.session_state.mc_clarify_answers.pop(qkey, None)
+
+        # If "not sure" selected and a simplified version exists, show it
+        if st.session_state.mc_answers.get(qkey) == "CLARIFY" and has_simplified:
+            sq = SIMPLIFIED_QUESTIONS[qkey]
+            st.markdown(
+                '<div class="simplified-card">'
+                '<p style="font-size:0.82rem;font-weight:700;color:#92400e;margin:0 0 8px">'
+                'Here is a simpler version of the same question:</p></div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(f"*{sq['q']}*")
+            s_opts = [f"{k}. {v}" for k, v in sq["options"].items()]
+            cur_s = st.session_state.mc_clarify_answers.get(qkey)
+            cur_s_d = f"{cur_s}. {sq['options'][cur_s]}" if cur_s and cur_s in sq["options"] else None
+            s_idx = s_opts.index(cur_s_d) if cur_s_d in s_opts else None
+            s_ch = st.radio(
+                label="", options=s_opts, index=s_idx,
+                key=f"mc_simplified_{qkey}", label_visibility="collapsed",
+            )
+            if s_ch:
+                st.session_state.mc_clarify_answers[qkey] = s_ch[0]
+        elif st.session_state.mc_answers.get(qkey) == "CLARIFY" and not has_simplified:
+            st.caption("Thank you for letting us know — please select your best guess from the options above.")
+
         st.markdown("---")
 
-    all_mc = all(q["key"] in st.session_state.mc_answers for q in st.session_state.mc_pool)
-    answered_mc = sum(1 for q in st.session_state.mc_pool if q["key"] in st.session_state.mc_answers)
+    # A question counts as answered if: A-D chosen, OR CLARIFY + simplified answered
+    def mc_answered(qkey):
+        ans = st.session_state.mc_answers.get(qkey)
+        if ans in ["A", "B", "C", "D"]:
+            return True
+        if ans == "CLARIFY":
+            if qkey not in SIMPLIFIED_QUESTIONS:
+                return True
+            return qkey in st.session_state.mc_clarify_answers
+        return False
+
+    all_mc = all(mc_answered(q["key"]) for q in st.session_state.mc_pool)
+    answered_mc = sum(1 for q in st.session_state.mc_pool if mc_answered(q["key"]))
 
     col1, col2, col3 = st.columns([1, 2, 1])
     with col1:
@@ -844,6 +1085,7 @@ elif st.session_state.page == 3:
             prev_page()
     with col3:
         if st.button("Continue", disabled=not all_mc):
+            save_mc()       # STAGE 2b: save MC answers to Google Sheets
             next_page()
 
     if not all_mc:
@@ -1102,13 +1344,15 @@ elif st.session_state.page == 5:
                     scores = score_scenario(key, final_text)
                     st.session_state.scenario_scores[key] = scores
 
+                # STAGE 2c: save this scenario progressively
+                with st.spinner("Saving your response..."):
+                    save_scenario(key, is_last)
+
                 if not is_last:
                     st.session_state.current_scenario_idx += 1
                     st.session_state.scenario_start = time.time()
                     st.rerun()
                 else:
-                    with st.spinner("Saving your responses..."):
-                        save_to_sheet()
                     next_page()
 
         if not can_submit:
