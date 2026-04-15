@@ -116,11 +116,17 @@ SHEET_HEADERS = [
 ]
 
 @st.cache_resource
+def _get_gspread_client():
+    """Cache only the auth client — not the worksheet object itself."""
+    creds_info = dict(st.secrets["gcp_service_account"])
+    creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
+    return gspread.authorize(creds)
+
+
 def get_sheet():
+    """Always return a fresh worksheet reference so header changes are picked up immediately."""
     try:
-        creds_info = dict(st.secrets["gcp_service_account"])
-        creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
-        gc = gspread.authorize(creds)
+        gc = _get_gspread_client()
         sh = gc.open_by_key(st.secrets["GSHEET_KEY"])
         try:
             ws = sh.worksheet("responses")
