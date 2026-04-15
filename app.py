@@ -109,11 +109,9 @@ SHEET_HEADERS = [
     "participant_id", "submitted_at", "major", "academic_year",
     "completion_status",
     "likert_1", "likert_2", "likert_3", "likert_4", "likert_5", "likert_avg",
-    "mc_questions", "mc_answers", "mc_score", "mc_total", "mc_time_sec",
+    "mc_questions", "mc_answers", "mc_e_flags", "mc_score", "mc_total", "mc_time_sec",
     "s1_key", "s1_initial_response", "s1_chat_turns", "s1_chat_history",
     "s1_final_response", "s1_ai_score_json", "s1_time_sec",
-    "s2_key", "s2_initial_response", "s2_chat_turns", "s2_chat_history",
-    "s2_final_response", "s2_ai_score_json", "s2_time_sec",
     "raffle_email",
 ]
 
@@ -127,7 +125,7 @@ def get_sheet():
         try:
             ws = sh.worksheet("responses")
         except gspread.WorksheetNotFound:
-            ws = sh.add_worksheet(title="responses", rows=2000, cols=35)
+            ws = sh.add_worksheet(title="responses", rows=2000, cols=30)
         if not ws.row_values(1):
             ws.append_row(SHEET_HEADERS)
         return ws
@@ -154,6 +152,8 @@ def _update_col(ws, row_idx, col_name, value):
     """Update a single named column in an existing row."""
     try:
         header = ws.row_values(1)
+        if col_name not in header:
+            return  # silently skip unknown columns
         col_idx = header.index(col_name) + 1
         ws.update_cell(row_idx, col_idx, str(value))
     except Exception:
@@ -207,7 +207,8 @@ def save_likert():
 def save_mc():
     """
     STAGE 2b — Called after Page 3 (MC quiz).
-    Updates MC columns and advances completion_status to 'mc_complete'.
+    Updates MC columns (including mc_e_flags) and advances completion_status to 'mc_complete'.
+    mc_answers stores only A/B/C/D; mc_e_flags stores {question_key: 0|1}.
     """
     ws = get_sheet()
     if ws is None:
@@ -217,11 +218,38 @@ def save_mc():
         return
     try:
         mc_pool    = st.session_state.mc_pool
-        mc_answers = st.session_state.mc_answers
-        mc_score   = sum(1 for q in mc_pool if mc_answers.get(q["key"]) == q["answer"])
-        mc_time    = round(time.time() - st.session_state.mc_start, 1) if st.session_state.mc_start else ""
+        mc_answers = st.session_state.mc_answers      # only A/B/C/D here now
+        mc_e_flags = st.session_state.mc_e_flags      # {key: 0|1}
+
+        # Score: use clarify_answers for CLARIFY questions, mc_answers for others
+        def effective_answer(q):
+            k = q["key"]
+            if mc_e_flags.get(k, 0) == 1 and k in SIMPLIFIED_QUESTIONS:
+                return st.session_state.mc_clarify_answers.get(k)
+            return mc_answers.get(k)
+
+        mc_score = sum(
+            1 for q in mc_pool
+            if effective_answer(q) == q["answer"]
+        )
+        mc_time = round(time.time() - st.session_state.mc_start, 1) if st.session_state.mc_start else ""
+
+        # Build clean answers dict: for E+simplified questions use clarify answer,
+        # for E+no-simplified use whatever A/B/C/D they also selected, else direct answer
+        clean_answers = {}
+        for q in mc_pool:
+            k = q["key"]
+            if mc_e_flags.get(k, 0) == 1 and k in SIMPLIFIED_QUESTIONS:
+                clean_answers[k] = st.session_state.mc_clarify_answers.get(k, "")
+            else:
+                clean_answers[k] = mc_answers.get(k, "")
+
+        # Ensure all questions have an e_flag entry (0 if never clicked)
+        full_e_flags = {q["key"]: mc_e_flags.get(q["key"], 0) for q in mc_pool}
+
         _update_col(ws, row_idx, "mc_questions", json.dumps([q["key"] for q in mc_pool]))
-        _update_col(ws, row_idx, "mc_answers",   json.dumps(mc_answers))
+        _update_col(ws, row_idx, "mc_answers",   json.dumps(clean_answers))
+        _update_col(ws, row_idx, "mc_e_flags",   json.dumps(full_e_flags))
         _update_col(ws, row_idx, "mc_score",     mc_score)
         _update_col(ws, row_idx, "mc_total",     len(mc_pool))
         _update_col(ws, row_idx, "mc_time_sec",  mc_time)
@@ -232,9 +260,8 @@ def save_mc():
 
 def save_scenario(scenario_key, is_last):
     """
-    STAGE 2c — Called after each scenario is submitted.
-    Updates scenario columns and advances completion_status.
-    is_last=True triggers 'submitted' status on the final scenario.
+    STAGE 2c — Called after the single scenario is submitted.
+    All scenario data is written to s1_* columns.
     """
     ws = get_sheet()
     if ws is None:
@@ -243,24 +270,17 @@ def save_scenario(scenario_key, is_last):
     if not row_idx:
         return
     try:
-        scenario_num = next(
-            (i + 1 for i, s in enumerate(SCENARIOS) if s["key"] == scenario_key), None
-        )
-        if not scenario_num:
-            return
-        prefix = f"s{scenario_num}"
         k = scenario_key
         chat_hist  = st.session_state.scenario_chat.get(k, [])
         user_turns = len([m for m in chat_hist if m["role"] == "user"])
-        _update_col(ws, row_idx, f"{prefix}_key",              k)
-        _update_col(ws, row_idx, f"{prefix}_initial_response", st.session_state.scenario_initial.get(k, ""))
-        _update_col(ws, row_idx, f"{prefix}_chat_turns",       user_turns)
-        _update_col(ws, row_idx, f"{prefix}_chat_history",     json.dumps(chat_hist))
-        _update_col(ws, row_idx, f"{prefix}_final_response",   st.session_state.scenario_final.get(k, ""))
-        _update_col(ws, row_idx, f"{prefix}_ai_score_json",    json.dumps(st.session_state.scenario_scores.get(k, {})))
-        _update_col(ws, row_idx, f"{prefix}_time_sec",         st.session_state.scenario_times.get(k, ""))
-        status = "submitted" if is_last else f"scenario_{scenario_num}_complete"
-        _update_col(ws, row_idx, "completion_status", status)
+        _update_col(ws, row_idx, "s1_key",              k)
+        _update_col(ws, row_idx, "s1_initial_response", st.session_state.scenario_initial.get(k, ""))
+        _update_col(ws, row_idx, "s1_chat_turns",       user_turns)
+        _update_col(ws, row_idx, "s1_chat_history",     json.dumps(chat_hist))
+        _update_col(ws, row_idx, "s1_final_response",   st.session_state.scenario_final.get(k, ""))
+        _update_col(ws, row_idx, "s1_ai_score_json",    json.dumps(st.session_state.scenario_scores.get(k, {})))
+        _update_col(ws, row_idx, "s1_time_sec",         st.session_state.scenario_times.get(k, ""))
+        _update_col(ws, row_idx, "completion_status",   "submitted")
     except Exception:
         pass
 
@@ -304,7 +324,7 @@ def _anthropic_client():
 
 
 def score_scenario(scenario_key, final_response):
-    scenario = next(s for s in SCENARIOS if s["key"] == scenario_key)
+    scenario = next(s for s in ALL_SCENARIOS if s["key"] == scenario_key)
     user_msg = (
         f"Scenario context: {scenario['context']}\n\n"
         f"Task prompt: {scenario['prompt']}\n\n"
@@ -324,7 +344,7 @@ def score_scenario(scenario_key, final_response):
 
 
 def chat_with_claude(scenario_key, user_message):
-    scenario = next(s for s in SCENARIOS if s["key"] == scenario_key)
+    scenario = next(s for s in ALL_SCENARIOS if s["key"] == scenario_key)
     history = st.session_state.scenario_chat.get(scenario_key, [])
     system = f"""You are an AI discussion partner helping a business student think through a real-world scenario as part of an academic survey.
 
@@ -365,8 +385,6 @@ LIKERT_LABELS = ["Strongly\nDisagree", "Disagree", "Neutral", "Agree", "Strongly
 
 
 # ── Simplified fallback questions ─────────────────────────────────────────────
-# Shown when a respondent selects "I'm not sure what's being asked."
-# Keyed by the original MC_BANK question key.
 SIMPLIFIED_QUESTIONS = {
     "pe_improve_output": {
         "q": "Your AI-generated report feels too vague. What is the best way to get a more useful result?",
@@ -688,7 +706,8 @@ MC_BANK = [
     },
 ]
 
-SCENARIOS = [
+# ── All scenarios (pool — one is randomly assigned per participant) ────────────
+ALL_SCENARIOS = [
     {
         "key": "scenario_marketing",
         "title": "Marketing Strategy Scenario",
@@ -761,10 +780,11 @@ def init_state():
         "major": None,
         "likert": {},
         "mc_pool": [],
-        "mc_answers": {},
-        "mc_clarify_answers": {},
+        "mc_answers": {},           # stores only A/B/C/D (or "" for E-only questions)
+        "mc_e_flags": {},           # {question_key: 0|1} — 1 if E was ever clicked
+        "mc_clarify_answers": {},   # simplified question answers for E+simplified flow
         "mc_start": None,
-        "current_scenario_idx": 0,
+        "assigned_scenario": None,  # randomly assigned scenario key
         "scenario_phase": {},
         "scenario_start": None,
         "scenario_initial": {},
@@ -783,7 +803,7 @@ def init_state():
 
 init_state()
 
-PAGE_NAMES = ["Welcome", "About You", "Self-Perception", "AI Knowledge Quiz", "Scenario Intro", "AI Scenarios", "Complete"]
+PAGE_NAMES = ["Welcome", "About You", "Self-Perception", "AI Knowledge Quiz", "Scenario Intro", "AI Scenario", "Complete"]
 TOTAL_PAGES = len(PAGE_NAMES) - 1
 
 
@@ -843,7 +863,7 @@ if st.session_state.page == 0:
       <p>Your honest responses will directly inform how SDSU prepares students for an AI-driven workforce.</p>
       <hr style="border:none;border-top:1px solid #e5e7eb;margin:1.2rem 0">
       <p style="font-size:0.9rem;color:#6b7280;margin:0">
-        <strong>~15 minutes</strong> &nbsp;·&nbsp;
+        <strong>~10 minutes</strong> &nbsp;·&nbsp;
         <strong>Fully anonymous</strong> — no names collected &nbsp;·&nbsp;
         Optional entry to win a <strong>$25 BetterBuzz Gift Card</strong>
       </p>
@@ -857,7 +877,7 @@ if st.session_state.page == 0:
         <strong>Part 1 —</strong> Quick background questions<br>
         <strong>Part 2 —</strong> Rate your own AI confidence (Likert scale)<br>
         <strong>Part 3 —</strong> AI knowledge quiz (multiple choice)<br>
-        <strong>Part 4 —</strong> Two real-world scenarios with live AI interaction
+        <strong>Part 4 —</strong> One real-world scenario with live AI interaction
       </p>
     </div>
     """, unsafe_allow_html=True)
@@ -915,6 +935,11 @@ elif st.session_state.page == 1:
             if st.button("Continue", disabled=not can_continue):
                 st.session_state.year = year
                 st.session_state.major = major
+                # Randomly assign one scenario at session start
+                if st.session_state.assigned_scenario is None:
+                    st.session_state.assigned_scenario = random.choice(
+                        [s["key"] for s in ALL_SCENARIOS]
+                    )
                 save_initial(major, year)   # STAGE 1: create row in Google Sheets
                 next_page()
 
@@ -1005,43 +1030,52 @@ elif st.session_state.page == 3:
 
     st.caption(
         "If a question uses terms you are unfamiliar with, select "
-        "'E. I\'m not sure what\'s being asked' — a simpler version will appear below it."
+        "'E. I\'m not sure what\'s being asked' — a simpler version will appear below it (where available)."
     )
     st.markdown("")
 
     for i, q in enumerate(st.session_state.mc_pool):
         qkey = q["key"]
         has_simplified = qkey in SIMPLIFIED_QUESTIONS
+        e_was_clicked = st.session_state.mc_e_flags.get(qkey, 0) == 1
 
-        # Build option list with clarify option appended as E
-        st.markdown(f"**Q{i + 1}.** {q['q']}")
+        # Build option list
         options = [f"{k}. {v}" for k, v in q["options"].items()]
         clarify_label = "E. I'm not sure what's being asked."
-        options_with_clarify = options + [clarify_label]
+        options_with_e = options + [clarify_label]
 
-        # Resolve current displayed selection
+        st.markdown(f"**Q{i + 1}.** {q['q']}")
+
+        # Determine current radio display value
         current_k = st.session_state.mc_answers.get(qkey)
-        if current_k == "CLARIFY":
+        if e_was_clicked and not current_k:
+            # E was clicked, no A/B/C/D yet selected — show E selected
             current_display = clarify_label
         elif current_k and current_k in q["options"]:
             current_display = f"{current_k}. {q['options'][current_k]}"
         else:
             current_display = None
-        idx_val = options_with_clarify.index(current_display) if current_display in options_with_clarify else None
+
+        idx_val = options_with_e.index(current_display) if current_display in options_with_e else None
 
         chosen = st.radio(
-            label="", options=options_with_clarify, index=idx_val,
+            label="", options=options_with_e, index=idx_val,
             key=f"mc_{qkey}", label_visibility="collapsed",
         )
+
         if chosen:
             if chosen == clarify_label:
-                st.session_state.mc_answers[qkey] = "CLARIFY"
+                # Record E click as binary flag; clear any prior A/B/C/D answer
+                st.session_state.mc_e_flags[qkey] = 1
+                st.session_state.mc_answers.pop(qkey, None)
             else:
+                # A/B/C/D selected — store letter answer, keep E flag if it was set
                 st.session_state.mc_answers[qkey] = chosen[0]
-                st.session_state.mc_clarify_answers.pop(qkey, None)
+                if not e_was_clicked:
+                    st.session_state.mc_e_flags[qkey] = 0
 
-        # If "not sure" selected and a simplified version exists, show it
-        if st.session_state.mc_answers.get(qkey) == "CLARIFY" and has_simplified:
+        # ── If E clicked and simplified version exists, show it ──
+        if st.session_state.mc_e_flags.get(qkey, 0) == 1 and has_simplified:
             sq = SIMPLIFIED_QUESTIONS[qkey]
             st.markdown(
                 '<div class="simplified-card">'
@@ -1060,21 +1094,32 @@ elif st.session_state.page == 3:
             )
             if s_ch:
                 st.session_state.mc_clarify_answers[qkey] = s_ch[0]
-        elif st.session_state.mc_answers.get(qkey) == "CLARIFY" and not has_simplified:
-            st.caption("Thank you for letting us know — please select your best guess from the options above.")
+
+        # ── If E clicked and NO simplified version — must pick A/B/C/D ──
+        elif st.session_state.mc_e_flags.get(qkey, 0) == 1 and not has_simplified:
+            st.warning(
+                "No simplified version is available for this question. "
+                "Please select your best guess from options A–D above."
+            )
 
         st.markdown("---")
 
-    # A question counts as answered if: A-D chosen, OR CLARIFY + simplified answered
+    # ── Answered logic ──
+    # A question is answered when:
+    #   - A/B/C/D directly selected (E flag = 0), OR
+    #   - E clicked + has simplified + simplified answered, OR
+    #   - E clicked + no simplified + A/B/C/D also selected
     def mc_answered(qkey):
-        ans = st.session_state.mc_answers.get(qkey)
-        if ans in ["A", "B", "C", "D"]:
-            return True
-        if ans == "CLARIFY":
-            if qkey not in SIMPLIFIED_QUESTIONS:
-                return True
+        e_flag = st.session_state.mc_e_flags.get(qkey, 0)
+        abcd = st.session_state.mc_answers.get(qkey)
+        if not e_flag:
+            return abcd in ["A", "B", "C", "D"]
+        # E was clicked
+        if qkey in SIMPLIFIED_QUESTIONS:
             return qkey in st.session_state.mc_clarify_answers
-        return False
+        else:
+            # No simplified — must have A/B/C/D selected
+            return abcd in ["A", "B", "C", "D"]
 
     all_mc = all(mc_answered(q["key"]) for q in st.session_state.mc_pool)
     answered_mc = sum(1 for q in st.session_state.mc_pool if mc_answered(q["key"]))
@@ -1085,7 +1130,7 @@ elif st.session_state.page == 3:
             prev_page()
     with col3:
         if st.button("Continue", disabled=not all_mc):
-            save_mc()       # STAGE 2b: save MC answers to Google Sheets
+            save_mc()       # STAGE 2b: save MC answers + e_flags to Google Sheets
             next_page()
 
     if not all_mc:
@@ -1101,15 +1146,15 @@ elif st.session_state.page == 4:
 
     st.markdown("""
     <div class="section-header">
-      <h2>Part 4: Real-World AI Scenarios</h2>
-      <p>Apply your thinking to two realistic business situations</p>
+      <h2>Part 4: Real-World AI Scenario</h2>
+      <p>Apply your thinking to a realistic business situation</p>
     </div>
     """, unsafe_allow_html=True)
 
     st.markdown("""
     <div class="survey-card">
       <h3 style="color:#A6192E;margin-top:0">What You'll Be Doing</h3>
-      <p>The final section presents two business scenarios. For each, you'll work through three short phases:</p>
+      <p>The final section presents one business scenario. You'll work through three short phases:</p>
       <p>
         <span style="background:#A6192E;color:white;border-radius:50%;padding:2px 9px;font-weight:700;margin-right:8px">1</span>
         <strong>Write your initial response</strong> — Read the scenario and share your thinking on your own first. No AI involved yet.
@@ -1128,7 +1173,6 @@ elif st.session_state.page == 4:
     st.markdown("""
     <div class="survey-card" style="background:#f9f1f2;border-color:#f3c4cc">
       <h4 style="color:#A6192E;margin-top:0">A Few Things to Know</h4>
-      <p style="font-size:0.92rem;color:#374151">You will be given <strong>two scenarios</strong> to respond to.</p>
       <ul style="margin:0;padding-left:1.2rem;font-size:0.92rem;color:#374151;line-height:1.8">
         <li>There are <strong>no trick questions</strong> — we're interested in your reasoning process, not a single correct answer.</li>
         <li>Responses are scored on <strong>depth and business thinking</strong>, not length.</li>
@@ -1142,19 +1186,25 @@ elif st.session_state.page == 4:
         if st.button("← Back"):
             prev_page()
     with col3:
-        if st.button("Begin Scenarios →"):
+        if st.button("Begin Scenario →"):
             next_page()
 
     show_progress()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PAGE 5 — Interactive AI Scenarios  (3-phase flow per scenario)
+# PAGE 5 — Interactive AI Scenario  (single randomly-assigned scenario)
 # ═══════════════════════════════════════════════════════════════════════════════
 elif st.session_state.page == 5:
 
-    idx = st.session_state.current_scenario_idx
-    scenario = SCENARIOS[idx]
+    # Resolve the assigned scenario
+    assigned_key = st.session_state.assigned_scenario
+    if assigned_key is None:
+        # Fallback: assign now if somehow not set
+        assigned_key = random.choice([s["key"] for s in ALL_SCENARIOS])
+        st.session_state.assigned_scenario = assigned_key
+
+    scenario = next(s for s in ALL_SCENARIOS if s["key"] == assigned_key)
     key = scenario["key"]
 
     if key not in st.session_state.scenario_phase:
@@ -1164,31 +1214,17 @@ elif st.session_state.page == 5:
 
     phase = st.session_state.scenario_phase[key]
 
-    pill_html = ""
-    for pi in range(len(SCENARIOS)):
-        if pi < idx:
-            pill_html += (f'<span style="background:#dcfce7;color:#166534;padding:3px 12px;'
-                          f'border-radius:99px;font-size:0.78rem;font-weight:600;margin-right:6px">'
-                          f'Scenario {pi + 1} ✓</span>')
-        elif pi == idx:
-            pill_html += (f'<span style="background:#A6192E;color:white;padding:3px 12px;'
-                          f'border-radius:99px;font-size:0.78rem;font-weight:600;margin-right:6px">'
-                          f'Scenario {pi + 1} — Active</span>')
-        else:
-            pill_html += (f'<span style="background:#f3f4f6;color:#9ca3af;padding:3px 12px;'
-                          f'border-radius:99px;font-size:0.78rem;font-weight:600;margin-right:6px">'
-                          f'Scenario {pi + 1}</span>')
-
-    phase_labels = {"initial": "Step 1 of 3 — Initial Response",
-                    "chat": "Step 2 of 3 — AI Discussion",
-                    "final": "Step 3 of 3 — Final Response"}
+    phase_labels = {
+        "initial": "Step 1 of 3 — Initial Response",
+        "chat":    "Step 2 of 3 — AI Discussion",
+        "final":   "Step 3 of 3 — Final Response",
+    }
 
     st.markdown(f"""
     <div class="section-header">
       <h2>{scenario['title']}</h2>
       <p>{scenario['domain']}</p>
     </div>
-    <div style="text-align:center;margin-bottom:1rem">{pill_html}</div>
     <div style="text-align:center;margin-bottom:1.4rem">
       <span class="phase-badge">{phase_labels[phase]}</span>
     </div>
@@ -1200,6 +1236,7 @@ elif st.session_state.page == 5:
     st.markdown(scenario["prompt"])
     st.markdown("---")
 
+    # ── Phase 1: Initial response ────────────────────────────────────────────
     if phase == "initial":
         st.markdown("### ✏️ Write Your Initial Response")
         st.caption(
@@ -1221,10 +1258,7 @@ elif st.session_state.page == 5:
         col1, col2, col3 = st.columns([1, 2, 1])
         with col1:
             if st.button("← Back"):
-                if idx > 0:
-                    st.session_state.current_scenario_idx -= 1
-                else:
-                    prev_page()
+                prev_page()
                 st.rerun()
         with col3:
             if st.button("Lock In & Open AI Chat →", disabled=not can_advance):
@@ -1235,6 +1269,7 @@ elif st.session_state.page == 5:
         if not can_advance:
             st.caption("Please write at least a few sentences before continuing.")
 
+    # ── Phase 2: Chat ────────────────────────────────────────────────────────
     elif phase == "chat":
         st.markdown("### 💬 Discuss with the AI Assistant")
 
@@ -1295,6 +1330,7 @@ elif st.session_state.page == 5:
                 st.session_state.scenario_phase[key] = "final"
                 st.rerun()
 
+    # ── Phase 3: Final response ──────────────────────────────────────────────
     elif phase == "final":
         st.markdown("### ✅ Write Your Final Response")
         st.caption(
@@ -1326,16 +1362,13 @@ elif st.session_state.page == 5:
         wc = wc_display(final_text)
         can_submit = wc >= 20
 
-        is_last = idx == len(SCENARIOS) - 1
-        btn_label = "Submit Survey" if is_last else "Next Scenario →"
-
         col1, col2, col3 = st.columns([1, 2, 1])
         with col1:
             if st.button("← Back to Chat"):
                 st.session_state.scenario_phase[key] = "chat"
                 st.rerun()
         with col3:
-            if st.button(btn_label, disabled=not can_submit):
+            if st.button("Submit Survey →", disabled=not can_submit):
                 elapsed = round(time.time() - (st.session_state.scenario_start or time.time()), 1)
                 st.session_state.scenario_final[key] = final_text
                 st.session_state.scenario_times[key] = elapsed
@@ -1344,16 +1377,10 @@ elif st.session_state.page == 5:
                     scores = score_scenario(key, final_text)
                     st.session_state.scenario_scores[key] = scores
 
-                # STAGE 2c: save this scenario progressively
                 with st.spinner("Saving your response..."):
-                    save_scenario(key, is_last)
+                    save_scenario(key, is_last=True)
 
-                if not is_last:
-                    st.session_state.current_scenario_idx += 1
-                    st.session_state.scenario_start = time.time()
-                    st.rerun()
-                else:
-                    next_page()
+                next_page()
 
         if not can_submit:
             st.caption("Please write at least a few sentences to submit.")
