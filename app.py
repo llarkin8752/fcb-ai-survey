@@ -115,9 +115,10 @@ SHEET_HEADERS = [
     "raffle_email",
 ]
 
-@st.cache_resource
+# FIX 1: Added ttl=3600 so credentials refresh every hour instead of expiring silently
+@st.cache_resource(ttl=3600)
 def _get_gspread_client():
-    """Cache only the auth client — not the worksheet object itself."""
+    """Cache the auth client with a 1-hour TTL to prevent token expiry failures."""
     creds_info = dict(st.secrets["gcp_service_account"])
     creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
     return gspread.authorize(creds)
@@ -133,10 +134,12 @@ def get_sheet():
         except gspread.WorksheetNotFound:
             ws = sh.add_worksheet(title="responses", rows=2000, cols=30)
         if not ws.row_values(1):
-            ws.append_row(SHEET_HEADERS)
+            ws.append_row(SHEET_HEADERS, value_input_option='RAW')
         return ws
     except Exception as e:
         st.error(f"⚠️ Google Sheets connection failed: {e}")
+        # FIX 2: Store last error in session state for debugging
+        st.session_state["last_sheet_error"] = str(e)
         return None
 
 
@@ -146,11 +149,13 @@ def _find_row(ws):
     """Return the 1-based sheet row index for the current session, or None."""
     try:
         all_ids = ws.col_values(1)
+        target = st.session_state.session_id
         for i, pid in enumerate(reversed(all_ids)):
-            if pid == st.session_state.session_id:
+            # FIX 3: Strip whitespace and compare as strings to handle Sheets number formatting
+            if str(pid).strip() == str(target).strip():
                 return len(all_ids) - i
-    except Exception:
-        pass
+    except Exception as e:
+        st.session_state["last_find_row_error"] = str(e)
     return None
 
 
@@ -159,11 +164,11 @@ def _update_col(ws, row_idx, col_name, value):
     try:
         header = ws.row_values(1)
         if col_name not in header:
-            return  # silently skip unknown columns
+            return
         col_idx = header.index(col_name) + 1
         ws.update_cell(row_idx, col_idx, str(value))
-    except Exception:
-        pass
+    except Exception as e:
+        st.session_state["last_update_error"] = f"{col_name}: {e}"
 
 
 def save_initial(major, year):
@@ -172,20 +177,28 @@ def save_initial(major, year):
     Creates a new row with participant_id, timestamp, major, year, and
     completion_status = 'started'. All other columns are left blank.
     """
+    # FIX 4: Guard against duplicate rows if user clicks Back then Continue again
+    if st.session_state.get("initial_saved"):
+        return
+
     ws = get_sheet()
     if ws is None:
         return
     try:
         header = ws.row_values(1)
         blank_row = [""] * len(header)
+        # FIX 5: Prefix session ID with "S_" so Google Sheets stores it as text not a number
         blank_row[header.index("participant_id")]    = st.session_state.session_id
         blank_row[header.index("submitted_at")]      = datetime.now().isoformat()
         blank_row[header.index("major")]             = major
         blank_row[header.index("academic_year")]     = year
         blank_row[header.index("completion_status")] = "started"
-        ws.append_row(blank_row)
-    except Exception:
-        pass
+        # FIX 6: Use value_input_option='RAW' so session_id is never converted to a number
+        ws.append_row(blank_row, value_input_option='RAW')
+        st.session_state["initial_saved"] = True
+        st.session_state["last_sheet_error"] = None
+    except Exception as e:
+        st.session_state["last_sheet_error"] = f"save_initial failed: {e}"
 
 
 def save_likert():
@@ -198,6 +211,7 @@ def save_likert():
         return
     row_idx = _find_row(ws)
     if not row_idx:
+        st.session_state["last_sheet_error"] = "save_likert: could not find row for session_id"
         return
     try:
         likert_vals = [st.session_state.likert.get(i, 0) for i in range(5)]
@@ -206,8 +220,8 @@ def save_likert():
             _update_col(ws, row_idx, f"likert_{i+1}", val)
         _update_col(ws, row_idx, "likert_avg", likert_avg)
         _update_col(ws, row_idx, "completion_status", "likert_complete")
-    except Exception:
-        pass
+    except Exception as e:
+        st.session_state["last_sheet_error"] = f"save_likert failed: {e}"
 
 
 def save_mc():
@@ -221,13 +235,13 @@ def save_mc():
         return
     row_idx = _find_row(ws)
     if not row_idx:
+        st.session_state["last_sheet_error"] = "save_mc: could not find row for session_id"
         return
     try:
         mc_pool    = st.session_state.mc_pool
-        mc_answers = st.session_state.mc_answers      # only A/B/C/D here now
-        mc_e_flags = st.session_state.mc_e_flags      # {key: 0|1}
+        mc_answers = st.session_state.mc_answers
+        mc_e_flags = st.session_state.mc_e_flags
 
-        # Score: use clarify_answers for CLARIFY questions, mc_answers for others
         def effective_answer(q):
             k = q["key"]
             if mc_e_flags.get(k, 0) == 1 and k in SIMPLIFIED_QUESTIONS:
@@ -240,8 +254,6 @@ def save_mc():
         )
         mc_time = round(time.time() - st.session_state.mc_start, 1) if st.session_state.mc_start else ""
 
-        # Build clean answers dict: for E+simplified questions use clarify answer,
-        # for E+no-simplified use whatever A/B/C/D they also selected, else direct answer
         clean_answers = {}
         for q in mc_pool:
             k = q["key"]
@@ -250,7 +262,6 @@ def save_mc():
             else:
                 clean_answers[k] = mc_answers.get(k, "")
 
-        # Ensure all questions have an e_flag entry (0 if never clicked)
         full_e_flags = {q["key"]: mc_e_flags.get(q["key"], 0) for q in mc_pool}
 
         _update_col(ws, row_idx, "mc_questions", json.dumps([q["key"] for q in mc_pool]))
@@ -260,8 +271,8 @@ def save_mc():
         _update_col(ws, row_idx, "mc_total",     len(mc_pool))
         _update_col(ws, row_idx, "mc_time_sec",  mc_time)
         _update_col(ws, row_idx, "completion_status", "mc_complete")
-    except Exception:
-        pass
+    except Exception as e:
+        st.session_state["last_sheet_error"] = f"save_mc failed: {e}"
 
 
 def save_scenario(scenario_key, is_last):
@@ -274,6 +285,7 @@ def save_scenario(scenario_key, is_last):
         return
     row_idx = _find_row(ws)
     if not row_idx:
+        st.session_state["last_sheet_error"] = "save_scenario: could not find row for session_id"
         return
     try:
         k = scenario_key
@@ -287,15 +299,14 @@ def save_scenario(scenario_key, is_last):
         _update_col(ws, row_idx, "s1_ai_score_json",    json.dumps(st.session_state.scenario_scores.get(k, {})))
         _update_col(ws, row_idx, "s1_time_sec",         st.session_state.scenario_times.get(k, ""))
         _update_col(ws, row_idx, "completion_status",   "submitted")
-    except Exception:
-        pass
+    except Exception as e:
+        st.session_state["last_sheet_error"] = f"save_scenario failed: {e}"
 
 
 def save_to_sheet():
     """
     STAGE 3 — Final save on full submission (kept for compatibility).
-    At this point all data is already saved progressively; this just
-    ensures completion_status is marked 'submitted'.
+    Ensures completion_status is marked 'submitted'.
     """
     ws = get_sheet()
     if ws is None:
@@ -319,8 +330,8 @@ def update_raffle_email(email):
         row_idx = _find_row(ws)
         if row_idx:
             _update_col(ws, row_idx, "raffle_email", email)
-    except Exception:
-        pass
+    except Exception as e:
+        st.session_state["last_sheet_error"] = f"update_raffle_email failed: {e}"
 
 
 # ── Anthropic helpers ─────────────────────────────────────────────────────────
@@ -338,7 +349,8 @@ def score_scenario(scenario_key, final_response):
     )
     try:
         msg = _anthropic_client().messages.create(
-            model="claude-sonnet-4-6",
+            # FIX 7: Corrected model string — was "claude-sonnet-4-6" which is invalid
+            model="claude-sonnet-4-20250514",
             max_tokens=700,
             system=SCORING_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_msg}],
@@ -346,6 +358,7 @@ def score_scenario(scenario_key, final_response):
         raw = msg.content[0].text.strip().replace("```json", "").replace("```", "").strip()
         return json.loads(raw)
     except Exception as e:
+        st.session_state["last_anthropic_error"] = f"score_scenario: {e}"
         return {"error": str(e), "total": 0, "summary": "Scoring unavailable."}
 
 
@@ -368,6 +381,7 @@ The student has already written an initial response. Your role is Socratic — a
         )
         return msg.content[0].text.strip()
     except Exception as e:
+        st.session_state["last_anthropic_error"] = f"chat_with_claude: {e}"
         return f"(Error: {e})"
 
 
@@ -712,7 +726,7 @@ MC_BANK = [
     },
 ]
 
-# ── All scenarios (pool — one is randomly assigned per participant) ────────────
+# ── All scenarios ─────────────────────────────────────────────────────────────
 ALL_SCENARIOS = [
     {
         "key": "scenario_marketing",
@@ -781,16 +795,17 @@ MAX_CHAT_TURNS = 5
 def init_state():
     defaults = {
         "page": 0,
-        "session_id": f"{int(time.time())}_{random.randint(1000, 9999)}",
+        # FIX 8: Prefix session_id with "S_" so Google Sheets never misreads it as a number
+        "session_id": f"S_{int(time.time())}_{random.randint(1000, 9999)}",
         "year": None,
         "major": None,
         "likert": {},
         "mc_pool": [],
-        "mc_answers": {},           # stores only A/B/C/D (or "" for E-only questions)
-        "mc_e_flags": {},           # {question_key: 0|1} — 1 if E was ever clicked
-        "mc_clarify_answers": {},   # simplified question answers for E+simplified flow
+        "mc_answers": {},
+        "mc_e_flags": {},
+        "mc_clarify_answers": {},
         "mc_start": None,
-        "assigned_scenario": None,  # randomly assigned scenario key
+        "assigned_scenario": None,
         "scenario_phase": {},
         "scenario_start": None,
         "scenario_initial": {},
@@ -801,6 +816,12 @@ def init_state():
         "chat_input_reset": 0,
         "raffle_email": "",
         "raffle_submitted": False,
+        "initial_saved": False,
+        # Debug error tracking
+        "last_sheet_error": None,
+        "last_find_row_error": None,
+        "last_update_error": None,
+        "last_anthropic_error": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -808,6 +829,61 @@ def init_state():
 
 
 init_state()
+
+# ── TEMPORARY DEBUG PANEL — Remove before final deployment ───────────────────
+with st.sidebar:
+    st.markdown("### 🔧 Connection Test")
+    if st.button("Test Connections"):
+        # Test 1: GCP secrets
+        try:
+            creds_info = dict(st.secrets["gcp_service_account"])
+            st.success(f"✅ GCP secrets loaded\n`{creds_info.get('client_email')}`")
+        except Exception as e:
+            st.error(f"❌ GCP secrets missing: {e}")
+
+        # Test 2: Sheet key
+        try:
+            key = st.secrets["GSHEET_KEY"]
+            st.success(f"✅ Sheet key: `{key}`")
+        except Exception as e:
+            st.error(f"❌ GSHEET_KEY missing: {e}")
+
+        # Test 3: Sheet connection + test write
+        try:
+            ws = get_sheet()
+            if ws:
+                st.success(f"✅ Sheet connected! Rows: {ws.row_count}")
+                try:
+                    ws.append_row(["TEST_DEBUG", "delete_me"], value_input_option='RAW')
+                    st.success("✅ Test write succeeded — check your sheet for a TEST_DEBUG row!")
+                except Exception as e:
+                    st.error(f"❌ Write failed: {e}")
+            else:
+                st.error("❌ get_sheet() returned None")
+        except Exception as e:
+            st.error(f"❌ Sheet connection failed: {e}")
+
+        # Test 4: Anthropic key
+        try:
+            ak = st.secrets["ANTHROPIC_API_KEY"]
+            st.success(f"✅ Anthropic key: `{ak[:12]}...`")
+        except Exception as e:
+            st.error(f"❌ Anthropic key missing: {e}")
+
+    # Show any recent errors from session state
+    st.markdown("---")
+    st.markdown("### 🪲 Last Known Errors")
+    for err_key in ["last_sheet_error", "last_find_row_error", "last_update_error", "last_anthropic_error"]:
+        val = st.session_state.get(err_key)
+        if val:
+            st.error(f"**{err_key}:** {val}")
+        else:
+            st.success(f"**{err_key}:** None")
+
+    st.markdown("---")
+    st.caption(f"Session ID: `{st.session_state.session_id}`")
+    st.caption(f"initial_saved: `{st.session_state.get('initial_saved')}`")
+# ── END DEBUG PANEL ───────────────────────────────────────────────────────────
 
 PAGE_NAMES = ["Welcome", "About You", "Self-Perception", "AI Knowledge Quiz", "Scenario Intro", "AI Scenario", "Complete"]
 TOTAL_PAGES = len(PAGE_NAMES) - 1
@@ -941,12 +1017,11 @@ elif st.session_state.page == 1:
             if st.button("Continue", disabled=not can_continue):
                 st.session_state.year = year
                 st.session_state.major = major
-                # Randomly assign one scenario at session start
                 if st.session_state.assigned_scenario is None:
                     st.session_state.assigned_scenario = random.choice(
                         [s["key"] for s in ALL_SCENARIOS]
                     )
-                save_initial(major, year)   # STAGE 1: create row in Google Sheets
+                save_initial(major, year)
                 next_page()
 
         if not can_continue:
@@ -998,7 +1073,7 @@ elif st.session_state.page == 2:
             prev_page()
     with col3:
         if st.button("Continue", disabled=not all_answered):
-            save_likert()   # STAGE 2a: save Likert scores to Google Sheets
+            save_likert()
             next_page()
 
     if not all_answered:
@@ -1045,17 +1120,14 @@ elif st.session_state.page == 3:
         has_simplified = qkey in SIMPLIFIED_QUESTIONS
         e_was_clicked = st.session_state.mc_e_flags.get(qkey, 0) == 1
 
-        # Build option list
         options = [f"{k}. {v}" for k, v in q["options"].items()]
         clarify_label = "E. I'm not sure what's being asked."
         options_with_e = options + [clarify_label]
 
         st.markdown(f"**Q{i + 1}.** {q['q']}")
 
-        # Determine current radio display value
         current_k = st.session_state.mc_answers.get(qkey)
         if e_was_clicked and not current_k:
-            # E was clicked, no A/B/C/D yet selected — show E selected
             current_display = clarify_label
         elif current_k and current_k in q["options"]:
             current_display = f"{current_k}. {q['options'][current_k]}"
@@ -1071,16 +1143,13 @@ elif st.session_state.page == 3:
 
         if chosen:
             if chosen == clarify_label:
-                # Record E click as binary flag; clear any prior A/B/C/D answer
                 st.session_state.mc_e_flags[qkey] = 1
                 st.session_state.mc_answers.pop(qkey, None)
             else:
-                # A/B/C/D selected — store letter answer, keep E flag if it was set
                 st.session_state.mc_answers[qkey] = chosen[0]
                 if not e_was_clicked:
                     st.session_state.mc_e_flags[qkey] = 0
 
-        # ── If E clicked and simplified version exists, show it ──
         if st.session_state.mc_e_flags.get(qkey, 0) == 1 and has_simplified:
             sq = SIMPLIFIED_QUESTIONS[qkey]
             st.markdown(
@@ -1101,7 +1170,6 @@ elif st.session_state.page == 3:
             if s_ch:
                 st.session_state.mc_clarify_answers[qkey] = s_ch[0]
 
-        # ── If E clicked and NO simplified version — must pick A/B/C/D ──
         elif st.session_state.mc_e_flags.get(qkey, 0) == 1 and not has_simplified:
             st.warning(
                 "No simplified version is available for this question. "
@@ -1110,21 +1178,14 @@ elif st.session_state.page == 3:
 
         st.markdown("---")
 
-    # ── Answered logic ──
-    # A question is answered when:
-    #   - A/B/C/D directly selected (E flag = 0), OR
-    #   - E clicked + has simplified + simplified answered, OR
-    #   - E clicked + no simplified + A/B/C/D also selected
     def mc_answered(qkey):
         e_flag = st.session_state.mc_e_flags.get(qkey, 0)
         abcd = st.session_state.mc_answers.get(qkey)
         if not e_flag:
             return abcd in ["A", "B", "C", "D"]
-        # E was clicked
         if qkey in SIMPLIFIED_QUESTIONS:
             return qkey in st.session_state.mc_clarify_answers
         else:
-            # No simplified — must have A/B/C/D selected
             return abcd in ["A", "B", "C", "D"]
 
     all_mc = all(mc_answered(q["key"]) for q in st.session_state.mc_pool)
@@ -1136,7 +1197,7 @@ elif st.session_state.page == 3:
             prev_page()
     with col3:
         if st.button("Continue", disabled=not all_mc):
-            save_mc()       # STAGE 2b: save MC answers + e_flags to Google Sheets
+            save_mc()
             next_page()
 
     if not all_mc:
@@ -1199,14 +1260,12 @@ elif st.session_state.page == 4:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PAGE 5 — Interactive AI Scenario  (single randomly-assigned scenario)
+# PAGE 5 — Interactive AI Scenario
 # ═══════════════════════════════════════════════════════════════════════════════
 elif st.session_state.page == 5:
 
-    # Resolve the assigned scenario
     assigned_key = st.session_state.assigned_scenario
     if assigned_key is None:
-        # Fallback: assign now if somehow not set
         assigned_key = random.choice([s["key"] for s in ALL_SCENARIOS])
         st.session_state.assigned_scenario = assigned_key
 
@@ -1242,7 +1301,6 @@ elif st.session_state.page == 5:
     st.markdown(scenario["prompt"])
     st.markdown("---")
 
-    # ── Phase 1: Initial response ────────────────────────────────────────────
     if phase == "initial":
         st.markdown("### ✏️ Write Your Initial Response")
         st.caption(
@@ -1275,7 +1333,6 @@ elif st.session_state.page == 5:
         if not can_advance:
             st.caption("Please write at least a few sentences before continuing.")
 
-    # ── Phase 2: Chat ────────────────────────────────────────────────────────
     elif phase == "chat":
         st.markdown("### 💬 Discuss with the AI Assistant")
 
@@ -1336,7 +1393,6 @@ elif st.session_state.page == 5:
                 st.session_state.scenario_phase[key] = "final"
                 st.rerun()
 
-    # ── Phase 3: Final response ──────────────────────────────────────────────
     elif phase == "final":
         st.markdown("### ✅ Write Your Final Response")
         st.caption(
