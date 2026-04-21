@@ -162,15 +162,12 @@ def get_sheet():
 # The old approach (col_values → reversed enumerate → arithmetic) breaks whenever
 # there is a blank cell in column A or any off-by-one in the list length.
 def _find_row(ws):
-    """Return the 1-based sheet row index for the current session, or None."""
+    """Return the 1-based sheet row index for the current session, or None.
+    Uses a broad except because gspread.exceptions.CellNotFound was removed in gspread 6.x.
+    """
     try:
         cell = ws.find(st.session_state.session_id, in_column=1)
-        return cell.row
-    except gspread.exceptions.CellNotFound:
-        st.session_state["last_find_row_error"] = (
-            f"session_id '{st.session_state.session_id}' not found in column A"
-        )
-        return None
+        return cell.row if cell else None
     except Exception as e:
         st.session_state["last_find_row_error"] = str(e)
         return None
