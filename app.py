@@ -14,7 +14,7 @@ import anthropic
 st.set_page_config(
     page_title="FCB AI Aptitude Survey",
     layout="centered",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
@@ -126,32 +126,21 @@ def _get_credentials():
     return Credentials.from_service_account_info(creds_info, scopes=SCOPES)
 
 
-def _get_gspread_client():
-    """Always produce a fresh authorized client so the token is never stale."""
-    return gspread.authorize(_get_credentials())
-
-
-# ── FIX #6: Cache the worksheet object for 60 s to avoid re-fetching headers
-# on every save call, while still being fresh enough to catch manual edits.
-@st.cache_resource(ttl=60)
-def _get_worksheet():
-    """Open and return the 'responses' worksheet, creating it if absent."""
-    gc = _get_gspread_client()
-    sh = gc.open_by_key(st.secrets["GSHEET_KEY"])
-    try:
-        ws = sh.worksheet("responses")
-    except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title="responses", rows=2000, cols=30)
-    # Write headers only if the sheet is completely empty
-    if not ws.row_values(1):
-        ws.append_row(SHEET_HEADERS, value_input_option='RAW')
-    return ws
-
-
 def get_sheet():
-    """Return the worksheet, routing errors into session state for the debug panel."""
+    """Return a fresh worksheet on every call — never cached.
+    Credentials ARE cached separately so auth is fast; only the worksheet
+    object itself is re-fetched so _find_row always sees the latest data.
+    """
     try:
-        return _get_worksheet()
+        gc = gspread.authorize(_get_credentials())
+        sh = gc.open_by_key(st.secrets["GSHEET_KEY"])
+        try:
+            ws = sh.worksheet("responses")
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(title="responses", rows=2000, cols=30)
+        if not ws.row_values(1):
+            ws.append_row(SHEET_HEADERS, value_input_option='RAW')
+        return ws
     except Exception as e:
         st.error(f"⚠️ Google Sheets connection failed: {e}")
         st.session_state["last_sheet_error"] = str(e)
@@ -228,7 +217,6 @@ def save_initial(major, year):
         ws.append_row(blank_row, value_input_option='RAW')
         st.session_state["initial_saved"] = True
         st.session_state["last_sheet_error"] = None
-        _get_worksheet.clear()  # force cache refresh so _find_row sees the new row
     except Exception as e:
         st.session_state["last_sheet_error"] = f"save_initial failed: {e}"
         # Do NOT set initial_saved = True — let next page load retry.
