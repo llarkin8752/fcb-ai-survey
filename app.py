@@ -228,6 +228,7 @@ def save_initial(major, year):
         ws.append_row(blank_row, value_input_option='RAW')
         st.session_state["initial_saved"] = True
         st.session_state["last_sheet_error"] = None
+        _get_worksheet.clear()  # force cache refresh so _find_row sees the new row
     except Exception as e:
         st.session_state["last_sheet_error"] = f"save_initial failed: {e}"
         # Do NOT set initial_saved = True — let next page load retry.
