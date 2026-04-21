@@ -115,55 +115,78 @@ SHEET_HEADERS = [
     "raffle_email",
 ]
 
-# FIX 1: Added ttl=3600 so credentials refresh every hour instead of expiring silently
+# ── FIX #1: Cache only credentials (not the authorized client).
+# The gspread Client holds a short-lived OAuth2 token; caching it causes silent
+# auth failures after ~1 hour. We now re-authorize on every get_sheet() call
+# using the long-lived Credentials object, which refreshes its own token automatically.
 @st.cache_resource(ttl=3600)
-def _get_gspread_client():
-    """Cache the auth client with a 1-hour TTL to prevent token expiry failures."""
+def _get_credentials():
+    """Cache the Credentials object, NOT the authorized client."""
     creds_info = dict(st.secrets["gcp_service_account"])
-    creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
-    return gspread.authorize(creds)
+    return Credentials.from_service_account_info(creds_info, scopes=SCOPES)
+
+
+def _get_gspread_client():
+    """Always produce a fresh authorized client so the token is never stale."""
+    return gspread.authorize(_get_credentials())
+
+
+# ── FIX #6: Cache the worksheet object for 60 s to avoid re-fetching headers
+# on every save call, while still being fresh enough to catch manual edits.
+@st.cache_resource(ttl=60)
+def _get_worksheet():
+    """Open and return the 'responses' worksheet, creating it if absent."""
+    gc = _get_gspread_client()
+    sh = gc.open_by_key(st.secrets["GSHEET_KEY"])
+    try:
+        ws = sh.worksheet("responses")
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title="responses", rows=2000, cols=30)
+    # Write headers only if the sheet is completely empty
+    if not ws.row_values(1):
+        ws.append_row(SHEET_HEADERS, value_input_option='RAW')
+    return ws
 
 
 def get_sheet():
-    """Always return a fresh worksheet reference so header changes are picked up immediately."""
+    """Return the worksheet, routing errors into session state for the debug panel."""
     try:
-        gc = _get_gspread_client()
-        sh = gc.open_by_key(st.secrets["GSHEET_KEY"])
-        try:
-            ws = sh.worksheet("responses")
-        except gspread.WorksheetNotFound:
-            ws = sh.add_worksheet(title="responses", rows=2000, cols=30)
-        if not ws.row_values(1):
-            ws.append_row(SHEET_HEADERS, value_input_option='RAW')
-        return ws
+        return _get_worksheet()
     except Exception as e:
         st.error(f"⚠️ Google Sheets connection failed: {e}")
-        # FIX 2: Store last error in session state for debugging
         st.session_state["last_sheet_error"] = str(e)
         return None
 
 
-# ── Progressive save helpers ──────────────────────────────────────────────────
-
+# ── FIX #2: Use ws.find() for reliable row lookup instead of manual index math.
+# The old approach (col_values → reversed enumerate → arithmetic) breaks whenever
+# there is a blank cell in column A or any off-by-one in the list length.
 def _find_row(ws):
     """Return the 1-based sheet row index for the current session, or None."""
     try:
-        all_ids = ws.col_values(1)
-        target = st.session_state.session_id
-        for i, pid in enumerate(reversed(all_ids)):
-            # FIX 3: Strip whitespace and compare as strings to handle Sheets number formatting
-            if str(pid).strip() == str(target).strip():
-                return len(all_ids) - i
+        cell = ws.find(st.session_state.session_id, in_column=1)
+        return cell.row
+    except gspread.exceptions.CellNotFound:
+        st.session_state["last_find_row_error"] = (
+            f"session_id '{st.session_state.session_id}' not found in column A"
+        )
+        return None
     except Exception as e:
         st.session_state["last_find_row_error"] = str(e)
-    return None
+        return None
 
 
+# ── FIX #5: Log missing columns instead of silently returning.
 def _update_col(ws, row_idx, col_name, value):
     """Update a single named column in an existing row."""
     try:
         header = ws.row_values(1)
         if col_name not in header:
+            # Previously this was a silent no-op — now we log it.
+            st.session_state["last_update_error"] = (
+                f"Column '{col_name}' not found in sheet header row. "
+                f"Header has {len(header)} columns: {header[:5]}..."
+            )
             return
         col_idx = header.index(col_name) + 1
         ws.update_cell(row_idx, col_idx, str(value))
@@ -171,34 +194,46 @@ def _update_col(ws, row_idx, col_name, value):
         st.session_state["last_update_error"] = f"{col_name}: {e}"
 
 
+# ── FIX #3: Improved save_initial with explicit error state and retry support.
 def save_initial(major, year):
     """
     STAGE 1 — Called on Page 1 (About You) when respondent confirms FCB status.
     Creates a new row with participant_id, timestamp, major, year, and
     completion_status = 'started'. All other columns are left blank.
+
+    Guard logic: only skipped if 'initial_saved' is True AND no sheet error
+    occurred last time — this allows the user to retry if the first attempt failed.
     """
-    # FIX 4: Guard against duplicate rows if user clicks Back then Continue again
-    if st.session_state.get("initial_saved"):
+    # Only skip if we KNOW the row was successfully written previously.
+    if st.session_state.get("initial_saved") and not st.session_state.get("last_sheet_error"):
         return
 
     ws = get_sheet()
     if ws is None:
+        # get_sheet() already stored the error; do NOT set initial_saved = True
+        # so the next rerun will retry.
         return
+
     try:
         header = ws.row_values(1)
+        if not header:
+            # Sheet lost its header row — re-write it before appending data.
+            ws.append_row(SHEET_HEADERS, value_input_option='RAW')
+            header = SHEET_HEADERS
+
         blank_row = [""] * len(header)
-        # FIX 5: Prefix session ID with "S_" so Google Sheets stores it as text not a number
         blank_row[header.index("participant_id")]    = st.session_state.session_id
         blank_row[header.index("submitted_at")]      = datetime.now().isoformat()
         blank_row[header.index("major")]             = major
         blank_row[header.index("academic_year")]     = year
         blank_row[header.index("completion_status")] = "started"
-        # FIX 6: Use value_input_option='RAW' so session_id is never converted to a number
+        # RAW prevents Google Sheets from coercing the session_id string to a number.
         ws.append_row(blank_row, value_input_option='RAW')
         st.session_state["initial_saved"] = True
         st.session_state["last_sheet_error"] = None
     except Exception as e:
         st.session_state["last_sheet_error"] = f"save_initial failed: {e}"
+        # Do NOT set initial_saved = True — let next page load retry.
 
 
 def save_likert():
@@ -349,7 +384,6 @@ def score_scenario(scenario_key, final_response):
     )
     try:
         msg = _anthropic_client().messages.create(
-            # FIX 7: Corrected model string — was "claude-sonnet-4-6" which is invalid
             model="claude-sonnet-4-20250514",
             max_tokens=700,
             system=SCORING_SYSTEM_PROMPT,
@@ -795,7 +829,7 @@ MAX_CHAT_TURNS = 5
 def init_state():
     defaults = {
         "page": 0,
-        # FIX 8: Prefix session_id with "S_" so Google Sheets never misreads it as a number
+        # Prefix with "S_" so Google Sheets never coerces the ID to a number.
         "session_id": f"S_{int(time.time())}_{random.randint(1000, 9999)}",
         "year": None,
         "major": None,
@@ -869,6 +903,18 @@ with st.sidebar:
             st.success(f"✅ Anthropic key: `{ak[:12]}...`")
         except Exception as e:
             st.error(f"❌ Anthropic key missing: {e}")
+
+        # Test 5: _find_row on current session (only useful after page 1 is saved)
+        try:
+            ws = get_sheet()
+            if ws:
+                row = _find_row(ws)
+                if row:
+                    st.success(f"✅ _find_row() located session at row {row}")
+                else:
+                    st.warning("⚠️ _find_row() returned None — row not yet created or session_id mismatch")
+        except Exception as e:
+            st.error(f"❌ _find_row() test failed: {e}")
 
     # Show any recent errors from session state
     st.markdown("---")
@@ -1041,6 +1087,14 @@ elif st.session_state.page == 2:
       <p>Rate your agreement with each statement — be honest, there are no right or wrong answers</p>
     </div>
     """, unsafe_allow_html=True)
+
+    # FIX #4 surface: Warn user if the initial row was never saved before letting them proceed.
+    if not st.session_state.get("initial_saved"):
+        st.warning(
+            "⚠️ We had trouble saving your background info. Attempting to retry… "
+            "If this persists, check your internet connection."
+        )
+        save_initial(st.session_state.get("major", ""), st.session_state.get("year", ""))
 
     all_answered = True
     for i, question in enumerate(LIKERT_QUESTIONS):
@@ -1542,4 +1596,3 @@ elif st.session_state.page == 6:
             st.error("Incorrect password.")
 
     show_progress()
-    
