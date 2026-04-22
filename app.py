@@ -14,7 +14,7 @@ import anthropic
 st.set_page_config(
     page_title="FCB AI Aptitude Survey",
     layout="centered",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
